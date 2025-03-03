@@ -13,6 +13,9 @@ declare(strict_types=1);
 
 namespace RoachPHP\Downloader;
 
+use Exception;
+use RoachPHP\Events\ExceptionReceived;
+use RoachPHP\Events\ExceptionReceiving;
 use RoachPHP\Events\RequestDropped;
 use RoachPHP\Events\RequestSending;
 use RoachPHP\Events\ResponseDropped;
@@ -55,42 +58,46 @@ final class Downloader
 
     public function prepare(Request $request): void
     {
-        foreach ($this->middleware as $middleware) {
-            $request = $middleware->handleRequest($request);
+        try {
+            foreach ($this->middleware as $middleware) {
+                $request = $middleware->handleRequest($request);
 
-            if ($request->wasDropped()) {
+                if ($request->wasDropped()) {
+                    $this->eventDispatcher->dispatch(
+                        new RequestDropped($request),
+                        RequestDropped::NAME,
+                    );
+
+                    return;
+                }
+            }
+
+            /**
+             * @psalm-suppress UnnecessaryVarAnnotation
+             *
+             * @var RequestSending $event
+             */
+            $event = $this->eventDispatcher->dispatch(
+                new RequestSending($request),
+                RequestSending::NAME,
+            );
+
+            if ($event->request->wasDropped()) {
                 $this->eventDispatcher->dispatch(
-                    new RequestDropped($request),
+                    new RequestDropped($event->request),
                     RequestDropped::NAME,
                 );
 
                 return;
             }
+
+            $this->requests[] = $event->request;
+        } catch (Exception $exception) {
+            $this->onExceptionReceived($exception, $request);
         }
-
-        /**
-         * @psalm-suppress UnnecessaryVarAnnotation
-         *
-         * @var RequestSending $event
-         */
-        $event = $this->eventDispatcher->dispatch(
-            new RequestSending($request),
-            RequestSending::NAME,
-        );
-
-        if ($event->request->wasDropped()) {
-            $this->eventDispatcher->dispatch(
-                new RequestDropped($event->request),
-                RequestDropped::NAME,
-            );
-
-            return;
-        }
-
-        $this->requests[] = $event->request;
     }
 
-    public function flush(?callable $callback = null): void
+    public function flush(?callable $onFullFilled = null): void
     {
         $requests = $this->requests;
 
@@ -98,7 +105,7 @@ final class Downloader
 
         foreach ($requests as $key => $request) {
             if ($request->getResponse() !== null) {
-                $this->onResponseReceived($request->getResponse(), $callback);
+                $this->onResponseReceived($request->getResponse(), $onFullFilled);
 
                 unset($requests[$key]);
             }
@@ -108,9 +115,12 @@ final class Downloader
             return;
         }
 
-        $this->client->pool(\array_values($requests), function (Response $response) use ($callback): void {
-            $this->onResponseReceived($response, $callback);
-        });
+        $this->client->pool(
+            \array_values($requests),
+            function (Response $response) use ($callback): void {
+                $this->onResponseReceived($response, $callback);
+            }
+        );
     }
 
     private function onResponseReceived(Response $response, ?callable $callback): void
@@ -132,6 +142,11 @@ final class Downloader
             $response = $middleware->handleResponse($response);
 
             if ($response->wasDropped()) {
+                $this->eventDispatcher->dispatch(
+                    new ResponseDropped($response),
+                    ResponseDropped::NAME,
+                );
+
                 return;
             }
         }
@@ -152,5 +167,22 @@ final class Downloader
         if (null !== $callback) {
             $callback($response);
         }
+    }
+
+    private function onExceptionReceived(Exception $exception, Request $request): void
+    {
+        $this->eventDispatcher->dispatch(
+            new ExceptionReceiving($exception),
+            ExceptionReceiving::NAME,
+        );
+
+        foreach ($this->middleware as $middleware) {
+            $exception = $middleware->handleException($exception, $request);
+        }
+
+        $this->eventDispatcher->dispatch(
+            new ExceptionReceived($exception),
+            ExceptionReceived::NAME,
+        );
     }
 }

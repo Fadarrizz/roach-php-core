@@ -54,6 +54,10 @@ final class ExecuteJavascriptMiddleware implements RequestMiddlewareInterface
                 'trace' => $e->getTraceAsString(),
             ]);
 
+            if ($request->getMeta('retry_count')) {
+                throw $e;
+            }
+
             return $request->drop('Error while executing javascript');
         }
 
