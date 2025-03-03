@@ -15,7 +15,7 @@ namespace RoachPHP\Http;
 
 use GuzzleHttp\Exception\GuzzleException;
 
-final class RequestException extends \Exception
+final class RequestException extends \Exception implements RequestExceptionInterface
 {
     public function __construct(
         private Request $request,
